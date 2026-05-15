@@ -1,0 +1,66 @@
+name: Build and Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test -v ./...
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Setup Ko
+        uses: ko-build/setup-ko@v0.9
+
+      - name: Setup Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Image
+        if: github.event_name != 'pull_request'
+        id: ko-build
+        env:
+          KO_DOCKER_REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          ko build --bare --platform=linux/amd64,linux/arm64,linux/arm/v7 . --push --tags=${{ github.ref_name }}
+          echo "digest=$(ko build --bare --platform=linux/amd64,linux/arm64,linux/arm/v7 . --push --tags=${{ github.ref_name }} 2>&1 | tail -1)" >> $GITHUB_OUTPUT
+
+      - name: Sign Image
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.ko-build.outputs.digest }}

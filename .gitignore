@@ -1,0 +1,16 @@
+prometheus-marstek-exporter
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+.env
+.envrc
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.claude/
