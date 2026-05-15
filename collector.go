@@ -1,18 +1,14 @@
 package main
 
 import (
-	"log/slog"
 	"strconv"
-	"sync"
+	"time"
 
-	"github.com/loafoe/go-marstek/pkg/marstek"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-type MultiDeviceCollector struct {
-	clients     []*marstek.Client
-	deviceInfos []DeviceIdentifier
-	instanceID  int
+type CachedCollector struct {
+	stateManager *StateManager
 
 	batterySOC           *prometheus.Desc
 	batteryTemperature   *prometheus.Desc
@@ -39,22 +35,16 @@ type MultiDeviceCollector struct {
 	inputEnergy           *prometheus.Desc
 	outputEnergy          *prometheus.Desc
 
-	deviceInfo    *prometheus.Desc
-	wifiSignal    *prometheus.Desc
-	operatingMode *prometheus.Desc
-
-	scrapeSuccess  *prometheus.Desc
-	scrapeDuration *prometheus.Desc
+	operatingMode  *prometheus.Desc
+	stateAge       *prometheus.Desc
 }
 
-func NewMultiDeviceCollector(clients []*marstek.Client, deviceInfos []DeviceIdentifier, instanceID int) *MultiDeviceCollector {
+func NewCachedCollector(stateManager *StateManager) *CachedCollector {
 	namespace := "marstek"
 	deviceLabels := []string{"device_ip", "device_name", "instance"}
 
-	return &MultiDeviceCollector{
-		clients:     clients,
-		deviceInfos: deviceInfos,
-		instanceID:  instanceID,
+	return &CachedCollector{
+		stateManager: stateManager,
 
 		batterySOC: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "battery", "soc_percent"),
@@ -165,36 +155,20 @@ func NewMultiDeviceCollector(clients []*marstek.Client, deviceInfos []DeviceIden
 			deviceLabels, nil,
 		),
 
-		deviceInfo: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "device", "info"),
-			"Device information",
-			[]string{"device_ip", "device", "version", "wifi_mac", "ble_mac"}, nil,
-		),
-		wifiSignal: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "wifi", "signal_strength_dbm"),
-			"WiFi signal strength in dBm",
-			append(deviceLabels, "ssid"), nil,
-		),
 		operatingMode: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "operating", "mode"),
 			"Current operating mode (1=active for the labeled mode)",
 			append(deviceLabels, "mode"), nil,
 		),
-
-		scrapeSuccess: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "scrape", "success"),
-			"Whether the last scrape was successful",
-			[]string{"device_ip"}, nil,
-		),
-		scrapeDuration: prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "scrape", "duration_seconds"),
-			"Duration of the last scrape in seconds",
-			[]string{"device_ip"}, nil,
+		stateAge: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "state", "age_seconds"),
+			"Age of cached state in seconds",
+			[]string{"device_ip", "device_name"}, nil,
 		),
 	}
 }
 
-func (c *MultiDeviceCollector) Describe(ch chan<- *prometheus.Desc) {
+func (c *CachedCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.batterySOC
 	ch <- c.batteryTemperature
 	ch <- c.batteryCapacity
@@ -216,45 +190,37 @@ func (c *MultiDeviceCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.totalLoadEnergy
 	ch <- c.inputEnergy
 	ch <- c.outputEnergy
-	ch <- c.deviceInfo
-	ch <- c.wifiSignal
 	ch <- c.operatingMode
-	ch <- c.scrapeSuccess
-	ch <- c.scrapeDuration
+	ch <- c.stateAge
 }
 
-func (c *MultiDeviceCollector) Collect(ch chan<- prometheus.Metric) {
-	var wg sync.WaitGroup
-	for i := range c.clients {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			c.collectDevice(ch, idx)
-		}(i)
+func (c *CachedCollector) Collect(ch chan<- prometheus.Metric) {
+	for _, info := range c.stateManager.GetDeviceInfos() {
+		state := c.stateManager.GetState(info.IP)
+		if state == nil {
+			continue
+		}
+
+		deviceName := info.Device
+		if deviceName == "" {
+			deviceName = "unknown"
+		}
+		instanceLabel := strconv.Itoa(c.stateManager.instanceID)
+
+		ch <- prometheus.MustNewConstMetric(c.stateAge, prometheus.GaugeValue,
+			time.Since(state.LastUpdate).Seconds(), info.IP, deviceName)
+
+		c.collectESStatus(ch, state, info.IP, deviceName, instanceLabel)
+		c.collectESMode(ch, state, info.IP, deviceName, instanceLabel)
+		c.collectBatteryStatus(ch, state, info.IP, deviceName, instanceLabel)
+		c.collectPVStatus(ch, state, info.IP, deviceName, instanceLabel)
+		c.collectEMStatus(ch, state, info.IP, deviceName, instanceLabel)
 	}
-	wg.Wait()
 }
 
-func (c *MultiDeviceCollector) collectDevice(ch chan<- prometheus.Metric, idx int) {
-	client := c.clients[idx]
-	info := c.deviceInfos[idx]
-	instanceLabel := strconv.Itoa(c.instanceID)
-	deviceName := info.Device
-	if deviceName == "" {
-		deviceName = "unknown"
-	}
-
-	c.collectESStatus(ch, client, info.IP, deviceName, instanceLabel)
-	c.collectESMode(ch, client, info.IP, deviceName, instanceLabel)
-	c.collectBatteryStatus(ch, client, info.IP, deviceName, instanceLabel)
-	c.collectPVStatus(ch, client, info.IP, deviceName, instanceLabel)
-	c.collectEMStatus(ch, client, info.IP, deviceName, instanceLabel)
-}
-
-func (c *MultiDeviceCollector) collectESStatus(ch chan<- prometheus.Metric, client *marstek.Client, deviceIP, deviceName, instanceLabel string) {
-	status, err := client.GetESStatus(c.instanceID)
-	if err != nil {
-		slog.Warn("failed to get ES status", "device", deviceIP, "error", err)
+func (c *CachedCollector) collectESStatus(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	status := state.ESStatus
+	if status == nil {
 		return
 	}
 
@@ -290,10 +256,9 @@ func (c *MultiDeviceCollector) collectESStatus(ch chan<- prometheus.Metric, clie
 	}
 }
 
-func (c *MultiDeviceCollector) collectESMode(ch chan<- prometheus.Metric, client *marstek.Client, deviceIP, deviceName, instanceLabel string) {
-	mode, err := client.GetESMode(c.instanceID)
-	if err != nil {
-		slog.Warn("failed to get ES mode", "device", deviceIP, "error", err)
+func (c *CachedCollector) collectESMode(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	mode := state.ESMode
+	if mode == nil {
 		return
 	}
 
@@ -314,10 +279,9 @@ func (c *MultiDeviceCollector) collectESMode(ch chan<- prometheus.Metric, client
 	}
 }
 
-func (c *MultiDeviceCollector) collectBatteryStatus(ch chan<- prometheus.Metric, client *marstek.Client, deviceIP, deviceName, instanceLabel string) {
-	status, err := client.GetBatteryStatus(c.instanceID)
-	if err != nil {
-		slog.Warn("failed to get battery status", "device", deviceIP, "error", err)
+func (c *CachedCollector) collectBatteryStatus(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	status := state.Battery
+	if status == nil {
 		return
 	}
 
@@ -341,10 +305,9 @@ func (c *MultiDeviceCollector) collectBatteryStatus(ch chan<- prometheus.Metric,
 	ch <- prometheus.MustNewConstMetric(c.batteryDischarging, prometheus.GaugeValue, discharging, deviceIP, deviceName, instanceLabel)
 }
 
-func (c *MultiDeviceCollector) collectPVStatus(ch chan<- prometheus.Metric, client *marstek.Client, deviceIP, deviceName, instanceLabel string) {
-	status, err := client.GetPVStatus(c.instanceID)
-	if err != nil {
-		slog.Warn("failed to get PV status", "device", deviceIP, "error", err)
+func (c *CachedCollector) collectPVStatus(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	status := state.PV
+	if status == nil {
 		return
 	}
 
@@ -371,10 +334,9 @@ func (c *MultiDeviceCollector) collectPVStatus(ch chan<- prometheus.Metric, clie
 	}
 }
 
-func (c *MultiDeviceCollector) collectEMStatus(ch chan<- prometheus.Metric, client *marstek.Client, deviceIP, deviceName, instanceLabel string) {
-	status, err := client.GetEMStatus(c.instanceID)
-	if err != nil {
-		slog.Warn("failed to get EM status", "device", deviceIP, "error", err)
+func (c *CachedCollector) collectEMStatus(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	status := state.EM
+	if status == nil {
 		return
 	}
 
