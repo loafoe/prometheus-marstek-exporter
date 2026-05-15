@@ -1,6 +1,6 @@
 # Prometheus Marstek Exporter
 
-A Prometheus exporter for [Marstek](https://www.marstekbattery.com/) home battery systems. Collects metrics from Marstek batteries over local LAN using the [go-marstek](https://github.com/loafoe/go-marstek) client library.
+A Prometheus exporter for [Marstek](https://eu.marstekenergy.com/) home battery systems. Collects metrics from Marstek batteries over local LAN using the [go-marstek](https://github.com/loafoe/go-marstek) client library.
 
 ## Metrics
 
