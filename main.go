@@ -24,7 +24,7 @@ func main() {
 		metricsPath     = flag.String("metrics-path", "/metrics", "Path under which to expose metrics")
 		autoDiscover    = flag.Bool("auto-discover", true, "Auto-discover devices on LAN if IPs not specified")
 		discoverTimeout = flag.Duration("discover-timeout", 5*time.Second, "Timeout for device discovery")
-		updateInterval  = flag.Duration("update-interval", 60*time.Second, "Interval for updating device state")
+		cyclePeriod     = flag.Duration("cycle-period", 30*time.Second, "Period over which to spread API calls per device")
 	)
 	flag.Parse()
 
@@ -44,9 +44,9 @@ func main() {
 	if envListen := os.Getenv("LISTEN_ADDRESS"); envListen != "" {
 		*listenAddr = envListen
 	}
-	if envInterval := os.Getenv("MARSTEK_UPDATE_INTERVAL"); envInterval != "" {
+	if envInterval := os.Getenv("MARSTEK_CYCLE_PERIOD"); envInterval != "" {
 		if d, err := time.ParseDuration(envInterval); err == nil {
-			*updateInterval = d
+			*cyclePeriod = d
 		}
 	}
 
@@ -99,7 +99,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	stateManager := NewStateManager(clients, deviceInfos, *instanceID, *updateInterval)
+	stateManager := NewStateManager(clients, deviceInfos, *instanceID, *cyclePeriod)
 	stateManager.Start()
 
 	collector := NewCachedCollector(stateManager)
@@ -130,7 +130,7 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 
-	slog.Info("starting marstek exporter", "address", *listenAddr, "devices", len(clients), "update_interval", *updateInterval)
+	slog.Info("starting marstek exporter", "address", *listenAddr, "devices", len(clients), "cycle_period", *cyclePeriod)
 	if err := http.ListenAndServe(*listenAddr, nil); err != nil {
 		slog.Error("failed to start server", "error", err)
 		os.Exit(1)

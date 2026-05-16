@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,13 +34,18 @@ type CachedCollector struct {
 	inputEnergy           *prometheus.Desc
 	outputEnergy          *prometheus.Desc
 
-	operatingMode  *prometheus.Desc
-	stateAge       *prometheus.Desc
+	operatingMode *prometheus.Desc
+	stateAge      *prometheus.Desc
+
+	apiCalls    *prometheus.Desc
+	apiErrors   *prometheus.Desc
+	apiTimeouts *prometheus.Desc
 }
 
 func NewCachedCollector(stateManager *StateManager) *CachedCollector {
 	namespace := "marstek"
 	deviceLabels := []string{"device_ip", "device_name", "instance"}
+	apiLabels := []string{"device_ip", "device_name", "endpoint"}
 
 	return &CachedCollector{
 		stateManager: stateManager,
@@ -162,8 +166,24 @@ func NewCachedCollector(stateManager *StateManager) *CachedCollector {
 		),
 		stateAge: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "state", "age_seconds"),
-			"Age of cached state in seconds",
-			[]string{"device_ip", "device_name"}, nil,
+			"Age of cached state in seconds per endpoint",
+			append([]string{"device_ip", "device_name"}, "endpoint"), nil,
+		),
+
+		apiCalls: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "api", "calls_total"),
+			"Total number of API calls made",
+			apiLabels, nil,
+		),
+		apiErrors: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "api", "errors_total"),
+			"Total number of API call errors",
+			apiLabels, nil,
+		),
+		apiTimeouts: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "api", "timeouts_total"),
+			"Total number of API call timeouts",
+			apiLabels, nil,
 		),
 	}
 }
@@ -192,11 +212,15 @@ func (c *CachedCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.outputEnergy
 	ch <- c.operatingMode
 	ch <- c.stateAge
+	ch <- c.apiCalls
+	ch <- c.apiErrors
+	ch <- c.apiTimeouts
 }
 
 func (c *CachedCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, info := range c.stateManager.GetDeviceInfos() {
 		state := c.stateManager.GetState(info.IP)
+		stats := c.stateManager.GetStats(info.IP)
 		if state == nil {
 			continue
 		}
@@ -205,11 +229,10 @@ func (c *CachedCollector) Collect(ch chan<- prometheus.Metric) {
 		if deviceName == "" {
 			deviceName = "unknown"
 		}
-		instanceLabel := strconv.Itoa(c.stateManager.instanceID)
+		instanceLabel := "0"
 
-		ch <- prometheus.MustNewConstMetric(c.stateAge, prometheus.GaugeValue,
-			time.Since(state.LastUpdate).Seconds(), info.IP, deviceName)
-
+		c.collectAPIStats(ch, stats, info.IP, deviceName)
+		c.collectStateAge(ch, state, info.IP, deviceName)
 		c.collectESStatus(ch, state, info.IP, deviceName, instanceLabel)
 		c.collectESMode(ch, state, info.IP, deviceName, instanceLabel)
 		c.collectBatteryStatus(ch, state, info.IP, deviceName, instanceLabel)
@@ -218,8 +241,47 @@ func (c *CachedCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+func (c *CachedCollector) collectAPIStats(ch chan<- prometheus.Metric, stats *DeviceStats, deviceIP, deviceName string) {
+	if stats == nil {
+		return
+	}
+
+	endpoints := []struct {
+		name  string
+		stats *APIStats
+	}{
+		{"ESStatus", &stats.ESStatus},
+		{"ESMode", &stats.ESMode},
+		{"Battery", &stats.Battery},
+		{"PV", &stats.PV},
+		{"EM", &stats.EM},
+	}
+
+	for _, ep := range endpoints {
+		ch <- prometheus.MustNewConstMetric(c.apiCalls, prometheus.CounterValue,
+			float64(ep.stats.Calls.Load()), deviceIP, deviceName, ep.name)
+		ch <- prometheus.MustNewConstMetric(c.apiErrors, prometheus.CounterValue,
+			float64(ep.stats.Errors.Load()), deviceIP, deviceName, ep.name)
+		ch <- prometheus.MustNewConstMetric(c.apiTimeouts, prometheus.CounterValue,
+			float64(ep.stats.Timeouts.Load()), deviceIP, deviceName, ep.name)
+	}
+}
+
+func (c *CachedCollector) collectStateAge(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName string) {
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+
+	for endpoint, lastUpdate := range state.LastUpdate {
+		ch <- prometheus.MustNewConstMetric(c.stateAge, prometheus.GaugeValue,
+			time.Since(lastUpdate).Seconds(), deviceIP, deviceName, endpoint)
+	}
+}
+
 func (c *CachedCollector) collectESStatus(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	state.mu.RLock()
 	status := state.ESStatus
+	state.mu.RUnlock()
+
 	if status == nil {
 		return
 	}
@@ -257,7 +319,10 @@ func (c *CachedCollector) collectESStatus(ch chan<- prometheus.Metric, state *De
 }
 
 func (c *CachedCollector) collectESMode(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	state.mu.RLock()
 	mode := state.ESMode
+	state.mu.RUnlock()
+
 	if mode == nil {
 		return
 	}
@@ -280,7 +345,10 @@ func (c *CachedCollector) collectESMode(ch chan<- prometheus.Metric, state *Devi
 }
 
 func (c *CachedCollector) collectBatteryStatus(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	state.mu.RLock()
 	status := state.Battery
+	state.mu.RUnlock()
+
 	if status == nil {
 		return
 	}
@@ -306,7 +374,10 @@ func (c *CachedCollector) collectBatteryStatus(ch chan<- prometheus.Metric, stat
 }
 
 func (c *CachedCollector) collectPVStatus(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	state.mu.RLock()
 	status := state.PV
+	state.mu.RUnlock()
+
 	if status == nil {
 		return
 	}
@@ -335,7 +406,10 @@ func (c *CachedCollector) collectPVStatus(ch chan<- prometheus.Metric, state *De
 }
 
 func (c *CachedCollector) collectEMStatus(ch chan<- prometheus.Metric, state *DeviceState, deviceIP, deviceName, instanceLabel string) {
+	state.mu.RLock()
 	status := state.EM
+	state.mu.RUnlock()
+
 	if status == nil {
 		return
 	}
