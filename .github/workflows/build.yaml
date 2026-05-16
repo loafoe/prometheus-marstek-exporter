@@ -18,6 +18,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
@@ -55,12 +56,10 @@ jobs:
         env:
           KO_DOCKER_REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
-          ko build --bare --platform=linux/amd64,linux/arm64,linux/arm/v7 . --push --tags=${{ github.ref_name }}
-          echo "digest=$(ko build --bare --platform=linux/amd64,linux/arm64,linux/arm/v7 . --push --tags=${{ github.ref_name }} 2>&1 | tail -1)" >> $GITHUB_OUTPUT
+          DIGEST=$(ko build --bare --platform=linux/amd64,linux/arm64,linux/arm/v7 . --push --tags=${{ github.ref_name }} --image-refs=/tmp/image-refs)
+          echo "digest=$(cat /tmp/image-refs)" >> $GITHUB_OUTPUT
 
       - name: Sign Image
         if: github.event_name != 'pull_request'
-        env:
-          COSIGN_EXPERIMENTAL: "true"
         run: |
-          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.ko-build.outputs.digest }}
+          cosign sign --yes ${{ steps.ko-build.outputs.digest }}
