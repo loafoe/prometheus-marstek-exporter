@@ -202,12 +202,24 @@ func (sm *StateManager) executeCall(call apiCall, client *marstek.Client, state 
 
 	err := call.update(client, state)
 	if err != nil {
+		if isRetryable(err) {
+			time.Sleep(2 * time.Second)
+			err = call.update(client, state)
+			if err == nil {
+				slog.Debug("API call succeeded on retry", "device", deviceIP, "call", call.name)
+				return
+			}
+		}
 		call.stats.Errors.Add(1)
 		if isTimeout(err) {
 			call.stats.Timeouts.Add(1)
 		}
-		slog.Debug("API call failed", "device", deviceIP, "call", call.name, "error", err)
+		slog.Warn("API call failed", "device", deviceIP, "call", call.name, "error", err)
 	}
+}
+
+func isRetryable(err error) bool {
+	return isParseError(err) || isTimeout(err)
 }
 
 func isTimeout(err error) bool {
@@ -216,6 +228,13 @@ func isTimeout(err error) bool {
 	}
 	errStr := err.Error()
 	return contains(errStr, "timeout") || contains(errStr, "i/o timeout")
+}
+
+func isParseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return contains(err.Error(), "Parse error")
 }
 
 func contains(s, substr string) bool {
