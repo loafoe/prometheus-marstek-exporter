@@ -24,7 +24,7 @@ func main() {
 		metricsPath     = flag.String("metrics-path", "/metrics", "Path under which to expose metrics")
 		autoDiscover    = flag.Bool("auto-discover", true, "Auto-discover devices on LAN if IPs not specified")
 		discoverTimeout = flag.Duration("discover-timeout", 5*time.Second, "Timeout for device discovery")
-		cyclePeriod     = flag.Duration("cycle-period", 30*time.Second, "Period over which to spread API calls per device")
+		enablePV        = flag.Bool("enable-pv", false, "Enable PV (solar) status polling")
 	)
 	flag.Parse()
 
@@ -44,10 +44,8 @@ func main() {
 	if envListen := os.Getenv("LISTEN_ADDRESS"); envListen != "" {
 		*listenAddr = envListen
 	}
-	if envInterval := os.Getenv("MARSTEK_CYCLE_PERIOD"); envInterval != "" {
-		if d, err := time.ParseDuration(envInterval); err == nil {
-			*cyclePeriod = d
-		}
+	if envPV := os.Getenv("MARSTEK_ENABLE_PV"); envPV == "true" || envPV == "1" {
+		*enablePV = true
 	}
 
 	var clients []*marstek.Client
@@ -99,7 +97,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	stateManager := NewStateManager(clients, deviceInfos, *instanceID, *cyclePeriod)
+	stateManager := NewStateManager(clients, deviceInfos, *instanceID, *enablePV)
 	stateManager.Start()
 
 	collector := NewCachedCollector(stateManager)
@@ -130,7 +128,7 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 
-	slog.Info("starting marstek exporter", "address", *listenAddr, "devices", len(clients), "cycle_period", *cyclePeriod)
+	slog.Info("starting marstek exporter", "address", *listenAddr, "devices", len(clients))
 	if err := http.ListenAndServe(*listenAddr, nil); err != nil {
 		slog.Error("failed to start server", "error", err)
 		os.Exit(1)

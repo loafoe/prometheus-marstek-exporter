@@ -40,11 +40,24 @@ type DeviceStats struct {
 	EM       APIStats
 }
 
+type EndpointConfig struct {
+	Name     string
+	Interval time.Duration
+}
+
+var DefaultEndpointIntervals = []EndpointConfig{
+	{"ESStatus", 1 * time.Minute},  // SOC, power values - high frequency
+	{"PV", 1 * time.Minute},        // PV power/voltage - high frequency
+	{"ESMode", 5 * time.Minute},    // Operating mode, phase power - medium frequency
+	{"Battery", 5 * time.Minute},   // Temperature, capacity - medium frequency
+	{"EM", 15 * time.Minute},       // CT state, energy counters - low frequency
+}
+
 type StateManager struct {
 	clients     []*marstek.Client
 	deviceInfos []DeviceIdentifier
 	instanceID  int
-	cyclePeriod time.Duration
+	enablePV    bool
 
 	mu     sync.RWMutex
 	states map[string]*DeviceState
@@ -54,12 +67,12 @@ type StateManager struct {
 	wg     sync.WaitGroup
 }
 
-func NewStateManager(clients []*marstek.Client, deviceInfos []DeviceIdentifier, instanceID int, cyclePeriod time.Duration) *StateManager {
+func NewStateManager(clients []*marstek.Client, deviceInfos []DeviceIdentifier, instanceID int, enablePV bool) *StateManager {
 	sm := &StateManager{
 		clients:     clients,
 		deviceInfos: deviceInfos,
 		instanceID:  instanceID,
-		cyclePeriod: cyclePeriod,
+		enablePV:    enablePV,
 		states:      make(map[string]*DeviceState),
 		stats:       make(map[string]*DeviceStats),
 		stopCh:      make(chan struct{}),
@@ -86,9 +99,11 @@ func (sm *StateManager) Stop() {
 }
 
 type apiCall struct {
-	name   string
-	stats  *APIStats
-	update func(client *marstek.Client, state *DeviceState) error
+	name     string
+	interval time.Duration
+	lastCall time.Time
+	stats    *APIStats
+	update   func(client *marstek.Client, state *DeviceState) error
 }
 
 func (sm *StateManager) deviceLoop(idx int) {
@@ -99,10 +114,20 @@ func (sm *StateManager) deviceLoop(idx int) {
 	state := sm.states[info.IP]
 	stats := sm.stats[info.IP]
 
+	intervalFor := func(name string) time.Duration {
+		for _, cfg := range DefaultEndpointIntervals {
+			if cfg.Name == name {
+				return cfg.Interval
+			}
+		}
+		return 1 * time.Minute
+	}
+
 	calls := []apiCall{
 		{
-			name:  "ESStatus",
-			stats: &stats.ESStatus,
+			name:     "ESStatus",
+			interval: intervalFor("ESStatus"),
+			stats:    &stats.ESStatus,
 			update: func(c *marstek.Client, s *DeviceState) error {
 				es, err := c.GetESStatus(sm.instanceID)
 				if err != nil {
@@ -116,8 +141,9 @@ func (sm *StateManager) deviceLoop(idx int) {
 			},
 		},
 		{
-			name:  "ESMode",
-			stats: &stats.ESMode,
+			name:     "ESMode",
+			interval: intervalFor("ESMode"),
+			stats:    &stats.ESMode,
 			update: func(c *marstek.Client, s *DeviceState) error {
 				mode, err := c.GetESMode(sm.instanceID)
 				if err != nil {
@@ -131,8 +157,9 @@ func (sm *StateManager) deviceLoop(idx int) {
 			},
 		},
 		{
-			name:  "Battery",
-			stats: &stats.Battery,
+			name:     "Battery",
+			interval: intervalFor("Battery"),
+			stats:    &stats.Battery,
 			update: func(c *marstek.Client, s *DeviceState) error {
 				bat, err := c.GetBatteryStatus(sm.instanceID)
 				if err != nil {
@@ -146,23 +173,9 @@ func (sm *StateManager) deviceLoop(idx int) {
 			},
 		},
 		{
-			name:  "PV",
-			stats: &stats.PV,
-			update: func(c *marstek.Client, s *DeviceState) error {
-				pv, err := c.GetPVStatus(sm.instanceID)
-				if err != nil {
-					return err
-				}
-				s.mu.Lock()
-				s.PV = pv
-				s.LastUpdate["PV"] = time.Now()
-				s.mu.Unlock()
-				return nil
-			},
-		},
-		{
-			name:  "EM",
-			stats: &stats.EM,
+			name:     "EM",
+			interval: intervalFor("EM"),
+			stats:    &stats.EM,
 			update: func(c *marstek.Client, s *DeviceState) error {
 				em, err := c.GetEMStatus(sm.instanceID)
 				if err != nil {
@@ -177,27 +190,51 @@ func (sm *StateManager) deviceLoop(idx int) {
 		},
 	}
 
-	callInterval := sm.cyclePeriod / time.Duration(len(calls))
-	ticker := time.NewTicker(callInterval)
+	if sm.enablePV {
+		calls = append(calls, apiCall{
+			name:     "PV",
+			interval: intervalFor("PV"),
+			stats:    &stats.PV,
+			update: func(c *marstek.Client, s *DeviceState) error {
+				pv, err := c.GetPVStatus(sm.instanceID)
+				if err != nil {
+					return err
+				}
+				s.mu.Lock()
+				s.PV = pv
+				s.LastUpdate["PV"] = time.Now()
+				s.mu.Unlock()
+				return nil
+			},
+		})
+	}
+
+	for i := range calls {
+		sm.executeCall(&calls[i], client, state, info.IP)
+		calls[i].lastCall = time.Now()
+		time.Sleep(2 * time.Second)
+	}
+
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-
-	callIdx := 0
-
-	sm.executeCall(calls[callIdx], client, state, info.IP)
-	callIdx = (callIdx + 1) % len(calls)
 
 	for {
 		select {
 		case <-ticker.C:
-			sm.executeCall(calls[callIdx], client, state, info.IP)
-			callIdx = (callIdx + 1) % len(calls)
+			now := time.Now()
+			for i := range calls {
+				if now.Sub(calls[i].lastCall) >= calls[i].interval {
+					sm.executeCall(&calls[i], client, state, info.IP)
+					calls[i].lastCall = now
+				}
+			}
 		case <-sm.stopCh:
 			return
 		}
 	}
 }
 
-func (sm *StateManager) executeCall(call apiCall, client *marstek.Client, state *DeviceState, deviceIP string) {
+func (sm *StateManager) executeCall(call *apiCall, client *marstek.Client, state *DeviceState, deviceIP string) {
 	call.stats.Calls.Add(1)
 
 	err := call.update(client, state)
