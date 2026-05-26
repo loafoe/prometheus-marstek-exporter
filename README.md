@@ -27,6 +27,12 @@ A Prometheus exporter for [Marstek](https://eu.marstekenergy.com/) home battery 
 | `marstek_load_energy_kwh_total` | Counter | Cumulative load consumption |
 | `marstek_operating_mode` | Gauge | Current mode (Auto, AI, Manual, Passive, Ups) |
 
+## Example Dashboard
+
+![Grafana Dashboard](resources/grafana-marstek.png)
+
+Import the dashboard from [resources/grafana-marstek.json](resources/grafana-marstek.json).
+
 ## Installation
 
 ### Docker
