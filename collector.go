@@ -218,26 +218,27 @@ func (c *CachedCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *CachedCollector) Collect(ch chan<- prometheus.Metric) {
-	for _, info := range c.stateManager.GetDeviceInfos() {
-		state := c.stateManager.GetState(info.IP)
-		stats := c.stateManager.GetStats(info.IP)
+	for _, dev := range c.stateManager.Snapshots() {
+		state := dev.State
+		stats := dev.Stats
 		if state == nil {
 			continue
 		}
 
-		deviceName := info.Device
+		deviceIP := dev.Info.IP
+		deviceName := dev.Info.Device
 		if deviceName == "" {
 			deviceName = "unknown"
 		}
 		instanceLabel := "0"
 
-		c.collectAPIStats(ch, stats, info.IP, deviceName)
-		c.collectStateAge(ch, state, info.IP, deviceName)
-		c.collectESStatus(ch, state, info.IP, deviceName, instanceLabel)
-		c.collectESMode(ch, state, info.IP, deviceName, instanceLabel)
-		c.collectBatteryStatus(ch, state, info.IP, deviceName, instanceLabel)
-		c.collectPVStatus(ch, state, info.IP, deviceName, instanceLabel)
-		c.collectEMStatus(ch, state, info.IP, deviceName, instanceLabel)
+		c.collectAPIStats(ch, stats, deviceIP, deviceName)
+		c.collectStateAge(ch, state, deviceIP, deviceName)
+		c.collectESStatus(ch, state, deviceIP, deviceName, instanceLabel)
+		c.collectESMode(ch, state, deviceIP, deviceName, instanceLabel)
+		c.collectBatteryStatus(ch, state, deviceIP, deviceName, instanceLabel)
+		c.collectPVStatus(ch, state, deviceIP, deviceName, instanceLabel)
+		c.collectEMStatus(ch, state, deviceIP, deviceName, instanceLabel)
 	}
 }
 

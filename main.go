@@ -16,15 +16,20 @@ import (
 
 func main() {
 	var (
-		listenAddr      = flag.String("listen-address", ":9141", "Address to listen on for metrics")
-		deviceIPs       = flag.String("device-ips", "", "Comma-separated list of Marstek device IPs (auto-discovered if not set)")
-		devicePort      = flag.Int("device-port", 30000, "Marstek device UDP port")
-		timeout         = flag.Duration("timeout", 10*time.Second, "Timeout for device communication")
-		instanceID      = flag.Int("instance-id", 0, "Device instance ID")
-		metricsPath     = flag.String("metrics-path", "/metrics", "Path under which to expose metrics")
-		autoDiscover    = flag.Bool("auto-discover", true, "Auto-discover devices on LAN if IPs not specified")
+		listenAddr   = flag.String("listen-address", ":9141", "Address to listen on for metrics")
+		deviceIPs    = flag.String("device-ips", "", "Comma-separated list of Marstek device IPs (auto-discovered if not set)")
+		devicePort   = flag.Int("device-port", 30000, "Marstek device UDP port")
+		timeout      = flag.Duration("timeout", 10*time.Second, "Timeout for device communication")
+		instanceID   = flag.Int("instance-id", 0, "Device instance ID")
+		metricsPath  = flag.String("metrics-path", "/metrics", "Path under which to expose metrics")
+		autoDiscover = flag.Bool("auto-discover", true,
+			"Auto-discover devices on LAN if IPs not specified, also used to recover devices that were assigned a new IP address")
 		discoverTimeout = flag.Duration("discover-timeout", 5*time.Second, "Timeout for device discovery")
 		enablePV        = flag.Bool("enable-pv", false, "Enable PV (solar) status polling")
+		maxTimeouts     = flag.Int("max-consecutive-timeouts", 10,
+			"Consecutive API timeouts on a device address before the address is considered stale and the device is rediscovered (0 disables the check)")
+		exitUnreachable = flag.Bool("exit-on-unreachable", true,
+			"Exit the exporter when a device is unreachable and cannot be recovered by rediscovering it on the LAN")
 	)
 	flag.Parse()
 
@@ -62,9 +67,14 @@ func main() {
 				marstek.WithPort(*devicePort),
 				marstek.WithTimeout(*timeout),
 			)
+			info := DeviceIdentifier{IP: ip}
+			if dev := probeDevice(ip, *devicePort, *timeout); dev != nil {
+				info.Device = dev.Device
+				info.WifiMAC = dev.WifiMAC
+			}
 			clients = append(clients, client)
-			deviceInfos = append(deviceInfos, DeviceIdentifier{IP: ip})
-			slog.Info("added device", "ip", ip)
+			deviceInfos = append(deviceInfos, info)
+			slog.Info("added device", "ip", ip, "device", info.Device, "mac", info.WifiMAC)
 		}
 	} else if *autoDiscover {
 		slog.Info("auto-discovering Marstek devices on LAN...")
@@ -97,8 +107,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	stateManager := NewStateManager(clients, deviceInfos, *instanceID, *enablePV)
+	stateManager := NewStateManager(clients, deviceInfos, StateManagerConfig{
+		InstanceID:             *instanceID,
+		EnablePV:               *enablePV,
+		AutoDiscover:           *autoDiscover,
+		DevicePort:             *devicePort,
+		RequestTimeout:         *timeout,
+		DiscoverTimeout:        *discoverTimeout,
+		MaxConsecutiveTimeouts: *maxTimeouts,
+		ExitOnUnreachable:      *exitUnreachable,
+	})
 	stateManager.Start()
+
+	go func() {
+		if err := <-stateManager.FatalErrors(); err != nil {
+			slog.Error("exiting due to an unrecoverable error", "error", err)
+			os.Exit(1)
+		}
+	}()
 
 	collector := NewCachedCollector(stateManager)
 	prometheus.MustRegister(collector)
@@ -112,10 +138,10 @@ func main() {
 <p><a href="` + *metricsPath + `">Metrics</a></p>
 <h2>Devices</h2>
 <ul>`))
-		for _, info := range deviceInfos {
-			w.Write([]byte("<li>" + info.IP))
-			if info.Device != "" {
-				w.Write([]byte(" - " + info.Device))
+		for _, dev := range stateManager.Snapshots() {
+			w.Write([]byte("<li>" + dev.Info.IP))
+			if dev.Info.Device != "" {
+				w.Write([]byte(" - " + dev.Info.Device))
 			}
 			w.Write([]byte("</li>"))
 		}
@@ -135,8 +161,25 @@ func main() {
 	}
 }
 
-type DeviceIdentifier struct {
-	IP      string
-	Device  string
-	WifiMAC string
+// probeDevice asks a device for its identity. The identity is used to find the
+// device again when it was assigned a new IP address. Failures are ignored, the
+// device is then polled without a known identity.
+func probeDevice(ip string, port int, timeout time.Duration) *marstek.DeviceInfo {
+	probeTimeout := timeout
+	if probeTimeout > 3*time.Second {
+		probeTimeout = 3 * time.Second
+	}
+
+	client := marstek.NewClient(ip,
+		marstek.WithPort(port),
+		marstek.WithTimeout(probeTimeout),
+		marstek.WithRetries(0),
+	)
+
+	dev, err := client.GetDevice("0")
+	if err != nil {
+		slog.Debug("could not read the identity of the device", "ip", ip, "error", err)
+		return nil
+	}
+	return dev
 }
