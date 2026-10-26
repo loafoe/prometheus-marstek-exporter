@@ -1,0 +1,14 @@
+.git
+.github
+.gitignore
+.claude
+.vscode
+.idea
+dist/
+prometheus-marstek-exporter
+*.test
+*.out
+.env
+.envrc
+Dockerfile
+.dockerignore

@@ -37,12 +37,41 @@ Import the dashboard from [resources/grafana-marstek.json](resources/grafana-mar
 
 ### Docker
 
+Pre-built multi-arch images are published to GitHub Container Registry:
+
 ```bash
 docker run -d --name marstek-exporter \
   -p 9141:9141 \
   -e MARSTEK_DEVICE_IPS=192.168.1.100 \
   ghcr.io/loafoe/prometheus-marstek-exporter:latest
 ```
+
+Discovery uses UDP broadcast, so the container needs to share the host network
+to find your battery. With `MARSTEK_DEVICE_IPS` set to a fixed address, the
+default bridge network is enough.
+
+```bash
+docker run -d --name marstek-exporter \
+  --network host \
+  -e MARSTEK_AUTO_DISCOVER=true \
+  ghcr.io/loafoe/prometheus-marstek-exporter:latest
+```
+
+#### Building the image yourself
+
+The repository contains a [Dockerfile](Dockerfile) which produces a small,
+non-root image on top of the Chainguard static base:
+
+```bash
+# single architecture, loaded into the local Docker daemon
+make image
+
+# or directly, for multiple architectures
+docker buildx build --platform linux/amd64,linux/arm64 -t marstek-exporter .
+```
+
+The multi-arch release images are built with [ko](https://ko.build/) and do not
+use the Dockerfile (`make docker-push` / `make release`).
 
 ### From Source
 
@@ -74,13 +103,35 @@ prometheus-marstek-exporter -device-ips 192.168.1.100
 
 ### Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `MARSTEK_DEVICE_IPS` | Comma-separated device IPs |
-| `MARSTEK_DEVICE_PORT` | Device UDP port |
-| `MARSTEK_INSTANCE_ID` | Device instance ID |
-| `LISTEN_ADDRESS` | Listen address |
-| `MARSTEK_ENABLE_PV` | Enable PV polling |
+Every flag can also be set through an environment variable. The name is derived
+from the flag name: upper case with a `MARSTEK_` prefix and `-` replaced by `_`.
+Values passed on the command line always win over the environment. Invalid
+values are logged and ignored, the flag keeps its default.
+
+| Variable | Equivalent flag | Description |
+|----------|-----------------|-------------|
+| `MARSTEK_DEVICE_IPS` | `-device-ips` | Comma-separated device IPs |
+| `MARSTEK_DEVICE_PORT` | `-device-port` | Device UDP port |
+| `MARSTEK_INSTANCE_ID` | `-instance-id` | Device instance ID |
+| `MARSTEK_AUTO_DISCOVER` | `-auto-discover` | Auto-discover devices on the LAN |
+| `MARSTEK_DISCOVER_TIMEOUT` | `-discover-timeout` | Discovery timeout (e.g. `5s`) |
+| `MARSTEK_TIMEOUT` | `-timeout` | Request timeout (e.g. `10s`) |
+| `MARSTEK_ENABLE_PV` | `-enable-pv` | Enable PV polling |
+| `MARSTEK_MAX_CONSECUTIVE_TIMEOUTS` | `-max-consecutive-timeouts` | Threshold before an address is treated as stale |
+| `MARSTEK_EXIT_ON_UNREACHABLE` | `-exit-on-unreachable` | Exit when a device cannot be recovered |
+| `MARSTEK_METRICS_PATH` | `-metrics-path` | Metrics endpoint |
+| `LISTEN_ADDRESS` | `-listen-address` | Listen address |
+
+Example: keep the exporter running and poll PV data in a container without any
+command line arguments:
+
+```bash
+docker run -d --name marstek-exporter --network host \
+  -e MARSTEK_AUTO_DISCOVER=true \
+  -e MARSTEK_ENABLE_PV=true \
+  -e MARSTEK_EXIT_ON_UNREACHABLE=false \
+  ghcr.io/loafoe/prometheus-marstek-exporter:latest
+```
 
 ## Recovering From An Address Change
 

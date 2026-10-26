@@ -1,4 +1,4 @@
-.PHONY: build test clean docker-build docker-push release
+.PHONY: build test clean image image-push docker-build docker-push release
 
 BINARY_NAME=prometheus-marstek-exporter
 IMAGE_REPO?=ghcr.io/loafoe/prometheus-marstek-exporter
@@ -15,6 +15,14 @@ clean:
 	rm -f $(BINARY_NAME)
 	rm -rf dist/
 
+# Build a plain Docker image from the Dockerfile for the local platform.
+image:
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE_REPO):$(VERSION) .
+
+image-push: image
+	docker push $(IMAGE_REPO):$(VERSION)
+
+# Multi-arch images built with ko (no Dockerfile needed).
 docker-build:
 	KO_DOCKER_REPO=$(IMAGE_REPO) ko build --bare --platform=$(PLATFORMS) .
 
@@ -32,4 +40,4 @@ fmt:
 	go fmt ./...
 
 run:
-	go run . -device-ip=$(MARSTEK_DEVICE_IP)
+	go run . -device-ips=$(MARSTEK_DEVICE_IPS)

@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -33,25 +32,10 @@ func main() {
 	)
 	flag.Parse()
 
-	if envAddr := os.Getenv("MARSTEK_DEVICE_IPS"); envAddr != "" && *deviceIPs == "" {
-		*deviceIPs = envAddr
-	}
-	if envPort := os.Getenv("MARSTEK_DEVICE_PORT"); envPort != "" {
-		if p, err := strconv.Atoi(envPort); err == nil {
-			*devicePort = p
-		}
-	}
-	if envInstance := os.Getenv("MARSTEK_INSTANCE_ID"); envInstance != "" {
-		if i, err := strconv.Atoi(envInstance); err == nil {
-			*instanceID = i
-		}
-	}
-	if envListen := os.Getenv("LISTEN_ADDRESS"); envListen != "" {
-		*listenAddr = envListen
-	}
-	if envPV := os.Getenv("MARSTEK_ENABLE_PV"); envPV == "true" || envPV == "1" {
-		*enablePV = true
-	}
+	// Every flag can also be set through an environment variable, which is what
+	// container deployments rely on. Values passed on the command line win over
+	// the environment.
+	applyEnvDefaults(flag.CommandLine)
 
 	var clients []*marstek.Client
 	var deviceInfos []DeviceIdentifier
@@ -103,7 +87,7 @@ func main() {
 	}
 
 	if len(clients) == 0 {
-		slog.Error("no devices configured (use -device-ips flag, MARSTEK_DEVICE_IPS env var, or -auto-discover)")
+		slog.Error("no devices configured (use -device-ips flag, MARSTEK_DEVICE_IPS env var, or enable auto-discovery)")
 		os.Exit(1)
 	}
 
@@ -159,6 +143,54 @@ func main() {
 		slog.Error("failed to start server", "error", err)
 		os.Exit(1)
 	}
+}
+
+// envAliases lists environment variables that do not follow the derived naming
+// scheme, kept for backwards compatibility.
+var envAliases = map[string][]string{
+	"listen-address": {"LISTEN_ADDRESS"},
+}
+
+// envName derives the environment variable name for a flag, for example
+// "auto-discover" becomes "MARSTEK_AUTO_DISCOVER".
+func envName(flagName string) string {
+	return "MARSTEK_" + strings.ToUpper(strings.ReplaceAll(flagName, "-", "_"))
+}
+
+// applyEnvDefaults sets the value of every flag that was not passed explicitly
+// on the command line from its environment variable, if that is set. Flag and
+// environment values are parsed by the flag package, so durations, numbers and
+// booleans use the same syntax in both places.
+func applyEnvDefaults(fs *flag.FlagSet) {
+	fromCommandLine := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { fromCommandLine[f.Name] = true })
+
+	fs.VisitAll(func(f *flag.Flag) {
+		if fromCommandLine[f.Name] {
+			return
+		}
+		names := append([]string{envName(f.Name)}, envAliases[f.Name]...)
+		for _, name := range names {
+			value, ok := os.LookupEnv(name)
+			if !ok || value == "" {
+				continue
+			}
+			// The flag values assign the parsed value even when parsing failed,
+			// so restore the previous value on error.
+			previous := f.Value.String()
+			if err := f.Value.Set(value); err != nil {
+				if restoreErr := f.Value.Set(previous); restoreErr != nil {
+					slog.Error("failed to restore flag default",
+						"flag", f.Name, "value", previous, "error", restoreErr)
+				}
+				slog.Warn("ignoring invalid environment variable",
+					"variable", name, "value", value, "flag", f.Name, "error", err)
+				continue
+			}
+			slog.Debug("configured flag from environment", "flag", f.Name, "variable", name)
+			return
+		}
+	})
 }
 
 // probeDevice asks a device for its identity. The identity is used to find the
